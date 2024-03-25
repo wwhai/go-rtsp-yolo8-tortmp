@@ -10,6 +10,8 @@ import (
 	"image/color"
 	"log"
 	"math"
+	"sync"
+	"time"
 
 	"github.com/bluenviron/gortsplib/v4"
 	"github.com/bluenviron/gortsplib/v4/pkg/base"
@@ -25,6 +27,7 @@ import (
 
 // This example requires the FFmpeg libraries, that can be installed with this command:
 // apt install -y libavformat-dev libswscale-dev gcc pkg-config
+var __Cgo_Locker = sync.Mutex{}
 
 func main() {
 
@@ -86,8 +89,48 @@ func main() {
 		panic(err4)
 	}
 	go FFMpegProcess.StartPush()
+	// SyncMatChannel := make(chan gocv.Mat, 1)
+	// go func() {
+	// 	NewestFrameMat := gocv.NewMat()
+	// 	defer func() {
+	// 		fmt.Println("推流进程退出")
+	// 	}()
+	// 	for {
+	// 		select {
+	// 		case <-context.Background().Done():
+	// 			return
+	// 		case <-SyncMatChannel:
+	// 		default:
 
+	// 		}
+	// 		__Cgo_Locker.Lock()
+	// 		Size := NewestFrameMat.Size()
+	// 		__Cgo_Locker.Unlock()
+	// 		if len(Size) < 2 {
+	// 			fmt.Println("NewestFrameMat.Size() <2")
+	// 			continue
+	// 		}
+	// 		__Cgo_Locker.Lock()
+	// 		pngData, err3 := gocv.IMEncode(gocv.PNGFileExt, NewestFrameMat)
+	// 		__Cgo_Locker.Unlock()
+	// 		if err3 != nil {
+	// 			log.Println("IMEncode ", err3)
+	// 			pngData.Close()
+	// 			return
+	// 		}
+	// 		__Cgo_Locker.Lock()
+	// 		NewestFrameMat.Close()
+	// 		__Cgo_Locker.Unlock()
+	// 		if err := FFMpegProcess.WritePNG(pngData.GetBytes()); err != nil {
+	// 			fmt.Println("WritePNG error", err)
+	// 			pngData.Close()
+	// 			return
+	// 		}
+	// 		pngData.Close()
+	// 	}
+	// }()
 	c.OnPacketRTP(media, forma, func(pkt *rtp.Packet) {
+		time.Sleep(10 * time.Millisecond)
 		// decode timestamp
 		_, ok := c.PacketPTS(media, pkt)
 		// log.Printf("PTS %v and Timestamp %v", pts, pkt.Timestamp)
@@ -101,67 +144,49 @@ func main() {
 		if err != nil {
 			return
 		}
+		defer func() {
+			nalus = nil
+		}()
 
 		for _, nalu := range nalus {
 			// convert NALUs into RGBA frames
-			img, err := frameDec.Decode(nalu)
-			if err != nil {
-				panic(err)
+			img, err1 := frameDec.Decode(nalu)
+			if err1 != nil {
+				panic(err1)
 			}
-
-			// wait for a frame
 			if img == nil {
 				continue
 			}
-
-			NewestFrameMat, err2 := gocv.ImageToMatRGB(img)
-			if err2 != nil {
-				log.Println("ImageToMatRGB ", err2)
+			pngDataNativeByteBuffer, ok := ImageMatToPngByte(img)
+			if !ok {
 				continue
 			}
-			defer NewestFrameMat.Close()
-			zoomedImgMat := gocv.NewMat()
-			defer zoomedImgMat.Close()
-			gocv.Resize(NewestFrameMat, &zoomedImgMat,
-				image.Point{640, 640}, 0, 0, gocv.InterpolationLinear)
-			blobMat := gocv.BlobFromImage(zoomedImgMat, 1/255.0,
-				image.Point{640, 640}, gocv.Scalar{}, true, false)
-			defer blobMat.Close()
-			if blobMat.Ptr() == nil {
+			defer pngDataNativeByteBuffer.Close()
+			if err4 := FFMpegProcess.WritePNG(pngDataNativeByteBuffer.GetBytes()); err4 != nil {
+				fmt.Println("WritePNG error", err4)
 				continue
 			}
-
-			Yolo8Net.SetInput(blobMat, "")
-			DnnOutput := Yolo8Net.Forward("")
-			defer DnnOutput.Close()
-			CalculateForwardResult := (CalculateForward(DnnOutput))
-			for _, Result := range CalculateForwardResult {
-				// log.Println(Result)
-				X := Result.Rectangle.Min.X * 3
-				Y := int(math.Round(float64(Result.Rectangle.Min.Y) * (float64(1.68))))
-				W := Result.Rectangle.Max.X * 3
-				H := int(math.Round(float64(Result.Rectangle.Max.Y) * (float64(1.68))))
-				gocv.Rectangle(&NewestFrameMat, image.Rectangle{
-					Min: image.Point{X: X, Y: Y},
-					Max: image.Point{X: W, Y: H},
-				}, color.RGBA{0, 255, 0, 0}, 2)
-				fmt.Println("检测到目标:", Result.Class, ",", yolo8.CoCo8ClassesCN[Result.Class], pkt.Timestamp)
-				gocv.PutText(&NewestFrameMat, fmt.Sprintf("ClassId: %d, Score: %f",
-					Result.Class, Result.Score),
-					image.Point{X: X, Y: Y},
-					gocv.FontHersheySimplex, 1, color.RGBA{255, 0, 0, 255}, 2)
-				pngData, err3 := gocv.IMEncode(gocv.PNGFileExt, NewestFrameMat)
-				if err3 != nil {
-					log.Println("IMEncode ", err3)
-					return
-				}
-				defer pngData.Close()
-				if err := FFMpegProcess.WritePNG(pngData.GetBytes()); err != nil {
-					fmt.Println("WritePNG ", err)
-					return
-				}
-
-			}
+			// OverlappedMat, ok := Yolo8Handler(Yolo8Net, pkt, img)
+			// defer OverlappedMat.Close()
+			// if !ok {
+			// 	continue
+			// }
+			// RGBFormatMat, err2 := gocv.ImageToMatRGB(img)
+			// if err2 != nil {
+			// 	log.Println("ImageToMatRGB error:", err2)
+			// 	continue
+			// }
+			// defer RGBFormatMat.Close()
+			// pngData, err3 := gocv.IMEncode(gocv.PNGFileExt, RGBFormatMat)
+			// if err3 != nil {
+			// 	log.Println("IMEncode error:", err3)
+			// 	continue
+			// }
+			// defer pngData.Close()
+			// if err2 := FFMpegProcess.WritePNG(pngData.GetBytes()); err2 != nil {
+			// 	fmt.Println("WritePNG error", err2)
+			// 	continue
+			// }
 		}
 	})
 	// start playing
@@ -172,6 +197,74 @@ func main() {
 
 	// wait until a fatal error
 	panic(c.Wait())
+}
+
+/*
+*
+* 直接吧Mat转成PNG流
+*
+ */
+func ImageMatToPngByte(img image.Image) (*gocv.NativeByteBuffer, bool) {
+	__Cgo_Locker.Lock()
+	defer __Cgo_Locker.Unlock()
+	RGBFormatMat, err2 := gocv.ImageToMatRGB(img)
+	if err2 != nil {
+		log.Println("ImageToMatRGB error:", err2)
+		return nil, false
+	}
+	defer RGBFormatMat.Close()
+	pngDataNativeByteBuffer, err3 := gocv.IMEncode(gocv.PNGFileExt, RGBFormatMat)
+	if err3 != nil {
+		log.Println("IMEncode error:", err3)
+		return pngDataNativeByteBuffer, false
+	}
+	return pngDataNativeByteBuffer, true
+}
+
+/*
+*
+* Yolo8融合,返回 Yolo8RGBFormatMat
+*
+ */
+func Yolo8Handler(Yolo8Net gocv.Net, pkt *rtp.Packet, img image.Image) (gocv.Mat, bool) {
+	__Cgo_Locker.Lock()
+	defer __Cgo_Locker.Unlock()
+	zoomedImgMat := gocv.NewMat()
+	defer zoomedImgMat.Close()
+	var err2 error
+	// Yolo8: input -> 1*3*84
+	Yolo8RGBFormatMat, err2 := gocv.ImageToMatRGB(img)
+	if err2 != nil {
+		log.Println("ImageToMatRGB ", err2)
+		return Yolo8RGBFormatMat, false
+	}
+	gocv.Resize(Yolo8RGBFormatMat, &zoomedImgMat,
+		image.Point{640, 640}, 0, 0, gocv.InterpolationLinear)
+	blobMat := gocv.BlobFromImage(zoomedImgMat, 1/255.0,
+		image.Point{640, 640}, gocv.Scalar{}, true, false)
+	defer blobMat.Close()
+	if blobMat.Ptr() == nil {
+		return Yolo8RGBFormatMat, false
+	}
+	Yolo8Net.SetInput(blobMat, "")
+	DnnOutput := Yolo8Net.Forward("")
+	defer DnnOutput.Close()
+	CalculateForwardResult := (CalculateForward(DnnOutput))
+	for _, Result := range CalculateForwardResult {
+		X := Result.Rectangle.Min.X * 3
+		Y := int(math.Round(float64(Result.Rectangle.Min.Y) * (float64(1.685))))
+		W := Result.Rectangle.Max.X * 3
+		H := int(math.Round(float64(Result.Rectangle.Max.Y) * (float64(1.685))))
+		gocv.Rectangle(&Yolo8RGBFormatMat, image.Rectangle{
+			Min: image.Point{X: X, Y: Y},
+			Max: image.Point{X: W, Y: H},
+		}, color.RGBA{0, 255, 0, 0}, 2)
+		fmt.Println("检测到目标:", Result.Class, ",", yolo8.CoCo8ClassesCN[Result.Class], pkt.SequenceNumber, pkt.Timestamp)
+		gocv.PutText(&Yolo8RGBFormatMat, fmt.Sprintf("ClassId: %d, Score: %f",
+			Result.Class, Result.Score), image.Point{X: X, Y: Y},
+			gocv.FontHersheySimplex, 1, color.RGBA{255, 0, 0, 255}, 2)
+	}
+	return Yolo8RGBFormatMat, true
 }
 
 type Result struct {
@@ -206,20 +299,20 @@ func CalculateForward(outs gocv.Mat) []Result {
 		y := ptr[j+rows]
 		w := ptr[j+rows*2]
 		h := ptr[j+rows*3]
-		confs := [80]float32{}
+		confidenceValue := [80]float32{}
 		for i := 4; i < cols; i++ {
-			confs[i-4] = ptr[j+rows*i]
+			confidenceValue[i-4] = ptr[j+rows*i]
 		}
-		bestId, bestScore := getBestFromConfs(confs[:])
+		bestId, bestScore := getBestFromConfidenceValue(confidenceValue[:])
 		scores[j] = bestScore
 		boxes[j] = image.Rect(int(x-w/2), int(y-h/2), int(x+w/2), int(y+h/2))
 		classIndexLists[j] = bestId
 	}
 	indices := gocv.NMSBoxes(boxes[:], scores[:], 0.25, 0.5)
-	for _, indice := range indices {
-		Box := boxes[indice]
-		Score := scores[indice]
-		Class := classIndexLists[indice]
+	for _, indic := range indices {
+		Box := boxes[indic]
+		Score := scores[indic]
+		Class := classIndexLists[indic]
 		OutResult = append(OutResult, Result{
 			Rectangle: Box,
 			Score:     Score,
@@ -228,13 +321,13 @@ func CalculateForward(outs gocv.Mat) []Result {
 	}
 	return OutResult
 }
-func getBestFromConfs(confs []float32) (int, float32) {
+func getBestFromConfidenceValue(confidenceValues []float32) (int, float32) {
 	bestId := 0
 	bestScore := float32(0)
-	for i, v := range confs {
-		if v > bestScore {
+	for i, confidenceValue := range confidenceValues {
+		if confidenceValue > bestScore {
 			bestId = i
-			bestScore = v
+			bestScore = confidenceValue
 		}
 	}
 	return bestId, bestScore

@@ -34,29 +34,32 @@ func NewStreamPusher(rtmpURL string) (*StreamPusher, error) {
 	cmd := exec.Command(
 		"./ffmpeg.exe",
 		"-re",
+		"-loglevel", "debug",
 		"-f", "image2pipe",
 		"-vcodec", "png",
 		"-i", "-",
 		"-c:v", "libx264",
 		"-pix_fmt", "yuv420p",
-		"-preset", "fast",
+		"-preset", "medium",
 		"-r", "25",
 		"-f", "flv",
 		rtmpURL,
 	)
 	fmt.Println("NewStreamPusher", cmd.String())
-	// 获取 FFmpeg 的标准输入
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("error creating stdin pipe: %v", err)
 	}
 	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	return &StreamPusher{
 		Cmd:   cmd,
 		Stdin: stdin,
 	}, nil
 }
+
 func (p *StreamPusher) WritePNG(pngData []byte) error {
+
 	if _, err := p.Stdin.Write(pngData); err != nil {
 		return fmt.Errorf("error writing PNG data to stdin: %v", err)
 	}
