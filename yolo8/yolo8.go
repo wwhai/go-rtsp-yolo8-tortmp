@@ -1,120 +1,171 @@
 package yolo8
 
 import (
-	"flag"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
 	"log"
 	"math"
-	"time"
+	"sync"
 
 	"gocv.io/x/gocv"
 )
 
-var (
-	modelFile      = flag.String("model", "yolov8n.onnx", "model path")
-	modelImageSize = flag.Int("size", 640, "model image size")
-	srcImage       = flag.String("image", "images/bus.jpg", "input image")
-)
+var __Cgo_Locker = sync.Mutex{}
 
-func __main() {
-	flag.Parse()
-	net := gocv.ReadNetFromONNX(*modelFile)
-	net.SetPreferableBackend(gocv.NetBackendCUDA)
-	net.SetPreferableTarget(gocv.NetTargetCUDA)
-	src := gocv.IMRead(*srcImage, gocv.IMReadColor)
-	modelSize := image.Pt(*modelImageSize, *modelImageSize)
-	resized := gocv.NewMat()
+type Yolo8Model struct {
+	Yolo8Net gocv.Net
+}
 
-	letterBox(src, &resized, modelSize)
-	blob := gocv.BlobFromImage(resized, 1/255.0, modelSize, gocv.Scalar{}, true, false)
-	var outs gocv.Mat
+func NewYolo8Model() *Yolo8Model {
+	return &Yolo8Model{
+		Yolo8Net: gocv.Net{},
+	}
+}
+func (M *Yolo8Model) LoadONNX() {
+	log.Println("加载 yolov8n.onnx")
+	M.Yolo8Net = gocv.ReadNetFromONNX("./yolov8n.onnx")
+	M.Yolo8Net.SetPreferableBackend(gocv.NetBackendCUDA)
+	M.Yolo8Net.SetPreferableTarget(gocv.NetTargetCUDA)
+	log.Println("加载 yolov8n.onnx 完成")
+}
+func (M *Yolo8Model) UnLoadONNX() {
+	M.Yolo8Net.Close()
+}
 
-	net.SetInput(blob, "")
-	outs = net.Forward("")
+/*
+*
+* 直接吧Mat转成PNG流
+*
+ */
+func ImageMatToPngByte(img image.Image) (*gocv.NativeByteBuffer, bool) {
+	__Cgo_Locker.Lock()
+	defer __Cgo_Locker.Unlock()
+	RGBFormatMat, err2 := gocv.ImageToMatRGB(img)
+	if err2 != nil {
+		log.Println("ImageToMatRGB error:", err2)
+		return nil, false
+	}
+	defer RGBFormatMat.Close()
+	pngDataNativeByteBuffer, err3 := gocv.IMEncode(gocv.PNGFileExt, RGBFormatMat)
+	if err3 != nil {
+		log.Println("IMEncode error:", err3)
+		return pngDataNativeByteBuffer, false
+	}
+	return pngDataNativeByteBuffer, true
+}
 
-	start := time.Now()
-	// sz := outs.Size() //outs形状是1*84*8400
-	cols := 84   //84列，前4个是cx，cy，w，h，后80是80类的概率
-	rows := 8400 //因为后后面要行转列所以这样命名 8400行，表示8400框
+/*
+*
+* Yolo8融合,返回 Yolo8 RGB Format Mat
+*
+ */
+func (M *Yolo8Model) Yolo8Handler(img image.Image) (gocv.Mat, bool) {
+	__Cgo_Locker.Lock()
+	defer __Cgo_Locker.Unlock()
+	zoomedImgMat := gocv.NewMat()
+	defer zoomedImgMat.Close()
+	var err2 error
+	// Yolo8: input -> 1*3*84
+	Yolo8RGBFormatMat, err2 := gocv.ImageToMatRGB(img)
+	if err2 != nil {
+		log.Println("ImageToMatRGB ", err2)
+		return Yolo8RGBFormatMat, false
+	}
+	gocv.Resize(Yolo8RGBFormatMat, &zoomedImgMat,
+		image.Point{640, 640}, 0, 0, gocv.InterpolationLinear)
+	blobMat := gocv.BlobFromImage(zoomedImgMat, 1/255.0,
+		image.Point{640, 640}, gocv.Scalar{}, true, false)
+	defer blobMat.Close()
+	if blobMat.Ptr() == nil {
+		return Yolo8RGBFormatMat, false
+	}
+	M.Yolo8Net.SetInput(blobMat, "")
+	DnnOutput := M.Yolo8Net.Forward("")
+	defer DnnOutput.Close()
+	CalculateForwardResult := (CalculateForward(DnnOutput))
+	for _, Result := range CalculateForwardResult {
+		X := Result.Rectangle.Min.X * 3
+		Y := int(math.Round(float64(Result.Rectangle.Min.Y) * (float64(1.685))))
+		W := Result.Rectangle.Max.X * 3
+		H := int(math.Round(float64(Result.Rectangle.Max.Y) * (float64(1.685))))
+		gocv.Rectangle(&Yolo8RGBFormatMat, image.Rectangle{
+			Min: image.Point{X: X, Y: Y},
+			Max: image.Point{X: W, Y: H},
+		}, color.RGBA{0, 255, 0, 0}, 2)
+		fmt.Println("检测到目标:", Result.Class, ",", CoCo8ClassesCN[Result.Class])
+		gocv.PutText(&Yolo8RGBFormatMat, fmt.Sprintf("ClassId: %d, Score: %f",
+			Result.Class, Result.Score), image.Point{X: X, Y: Y},
+			gocv.FontHersheySimplex, 1, color.RGBA{255, 0, 0, 255}, 2)
+	}
+	return Yolo8RGBFormatMat, true
+}
 
-	// log.Println(sz)
+type Result struct {
+	Rectangle image.Rectangle
+	Class     int
+	ClassName string
+	Score     float32
+}
 
+func (O Result) String() string {
+	O.ClassName = CoCo8ClassesCN[O.Class]
+	if bytes, err := json.Marshal(O); err != nil {
+		return "{}"
+	} else {
+		return string(bytes)
+	}
+}
+
+/*
+*
+* 计算返回值
+*
+ */
+func CalculateForward(outs gocv.Mat) []Result {
+	OutResult := []Result{}
+	cols := 84
+	rows := 8400
 	ptr, _ := outs.DataPtrFloat32()
-
 	boxes := [8400]image.Rectangle{}
 	scores := [8400]float32{}
 	classIndexLists := [8400]int{}
-
 	for j := 0; j < rows; j++ {
-
 		x := ptr[j]
 		y := ptr[j+rows]
 		w := ptr[j+rows*2]
 		h := ptr[j+rows*3]
-		confs := [80]float32{}
+		confidenceValue := [80]float32{}
 		for i := 4; i < cols; i++ {
-			confs[i-4] = ptr[j+rows*i]
+			confidenceValue[i-4] = ptr[j+rows*i]
 		}
-		bestId, bestScore := getBestFromConfs(confs[:])
-
+		bestId, bestScore := getBestFromConfidenceValue(confidenceValue[:])
 		scores[j] = bestScore
-
 		boxes[j] = image.Rect(int(x-w/2), int(y-h/2), int(x+w/2), int(y+h/2))
 		classIndexLists[j] = bestId
-
 	}
-	elapsed := time.Since(start)
-	fmt.Println("该函数执行完成耗时：", elapsed)
 	indices := gocv.NMSBoxes(boxes[:], scores[:], 0.25, 0.5)
-
-	log.Println(indices)
-
-	output := resized.Clone()
-	for _, v := range indices {
-		log.Println(v)
-
-		gocv.Rectangle(&output, boxes[v], color.RGBA{0, 255, 0, 0}, 2)
-		gocv.PutText(&output, fmt.Sprintf("ClassId: %d, Score: %f", classIndexLists[v], scores[v]),
-			boxes[v].Min, gocv.FontHersheySimplex, 0.5, color.RGBA{255, 0, 0, 255}, 2)
-
+	for _, indic := range indices {
+		Box := boxes[indic]
+		Score := scores[indic]
+		Class := classIndexLists[indic]
+		OutResult = append(OutResult, Result{
+			Rectangle: Box,
+			Score:     Score,
+			Class:     Class,
+		})
 	}
-
-	w := gocv.NewWindow("detected")
-	w.ResizeWindow(modelSize.X, modelSize.Y)
-	w.IMShow(output)
-	w.WaitKey(-1)
-
-	src.Close()
+	return OutResult
 }
-
-func getBestFromConfs(confs []float32) (int, float32) {
+func getBestFromConfidenceValue(confidenceValues []float32) (int, float32) {
 	bestId := 0
 	bestScore := float32(0)
-	for i, v := range confs {
-		if v > bestScore {
+	for i, confidenceValue := range confidenceValues {
+		if confidenceValue > bestScore {
 			bestId = i
-			bestScore = v
+			bestScore = confidenceValue
 		}
 	}
 	return bestId, bestScore
-}
-
-func letterBox(src gocv.Mat, dst *gocv.Mat, size image.Point) {
-	k := math.Min(float64(size.X)/float64(src.Cols()), float64(size.Y)/float64(src.Rows()))
-	newSize := image.Pt(int(k*float64(src.Cols())), int(k*float64(src.Rows())))
-
-	tmp := gocv.NewMat()
-	gocv.Resize(src, &tmp, newSize, 0, 0, gocv.InterpolationLinear)
-
-	if dst.Cols() != size.X || dst.Rows() != size.Y {
-		dstNew := gocv.NewMatWithSize(size.Y, size.X, src.Type())
-		dstNew.CopyTo(dst)
-	}
-
-	rectOfTmp := image.Rect(0, 0, newSize.X, newSize.Y)
-
-	regionOfDst := dst.Region(rectOfTmp)
-	tmp.CopyTo(&regionOfDst)
 }

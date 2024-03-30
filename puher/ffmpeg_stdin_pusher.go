@@ -18,14 +18,15 @@ package pusher
 import (
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
+	"sync"
 )
 
 // StreamPusher 结构体包含了推流器的相关信息
 type StreamPusher struct {
-	Cmd   *exec.Cmd
-	Stdin io.WriteCloser
+	Cmd    *exec.Cmd
+	Stdin  io.WriteCloser
+	locker sync.Mutex
 }
 
 // NewStreamPusher 创建一个新的推流器实例
@@ -33,7 +34,7 @@ func NewStreamPusher(rtmpURL string) (*StreamPusher, error) {
 	// 构建 FFmpeg 推流命令
 	cmd := exec.Command(
 		"./ffmpeg.exe",
-		"-re",
+		// "-re",
 		"-loglevel", "debug",
 		"-f", "image2pipe",
 		"-vcodec", "png",
@@ -41,7 +42,7 @@ func NewStreamPusher(rtmpURL string) (*StreamPusher, error) {
 		"-c:v", "libx264",
 		"-pix_fmt", "yuv420p",
 		"-preset", "medium",
-		"-r", "25",
+		// "-r", "25",
 		"-f", "flv",
 		rtmpURL,
 	)
@@ -50,16 +51,18 @@ func NewStreamPusher(rtmpURL string) (*StreamPusher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error creating stdin pipe: %v", err)
 	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// cmd.Stdout = os.Stdout
+	// cmd.Stderr = os.Stderr
 	return &StreamPusher{
-		Cmd:   cmd,
-		Stdin: stdin,
+		Cmd:    cmd,
+		Stdin:  stdin,
+		locker: sync.Mutex{},
 	}, nil
 }
 
 func (p *StreamPusher) WritePNG(pngData []byte) error {
-
+	p.locker.Lock()
+	defer p.locker.Unlock()
 	if _, err := p.Stdin.Write(pngData); err != nil {
 		return fmt.Errorf("error writing PNG data to stdin: %v", err)
 	}
