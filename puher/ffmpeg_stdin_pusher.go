@@ -41,7 +41,7 @@ func NewStreamPusher(rtmpURL string) (*StreamPusher, error) {
 		"-i", "-",
 		"-c:v", "libx264",
 		"-pix_fmt", "yuv420p",
-		"-preset", "medium",
+		"-preset", "veryfast",
 		// "-r", "25",
 		"-f", "flv",
 		rtmpURL,
